@@ -1,18 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('yaytd_logo_64.png', '.')],
+    datas=[('yaytd_logo_64.png', '.')] + collect_data_files('sv_ttk'),
     hiddenimports=['PIL._tkinter_finder'] + collect_submodules('yt_dlp'),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['darkdetect._linux_detect', 'darkdetect._windows_detect'],
     noarchive=False,
     optimize=0,
 )
@@ -52,7 +52,4 @@ app = BUNDLE(
     name='yaytd.app',
     icon='yaytd.icns',
     bundle_identifier=None,
-    info_plist={
-        'NSRequiresAquaSystemAppearance': True,
-    },
 )

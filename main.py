@@ -1,19 +1,23 @@
 # Imports
 import os
+import ssl
 import sys
-import certifi
+import threading
+import webbrowser
 from dataclasses import dataclass
-from PIL import Image
-from tkinter import Menu
-from tkinter.constants import *
-from guizero import *
+from datetime import timedelta
+from pathlib import Path
+from tkinter import Menu, filedialog
+import tkinter as tk
+from tkinter import ttk
+from urllib.request import urlopen
+
+import certifi
+import darkdetect
+from PIL import Image, ImageTk
+import sv_ttk
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import sanitize_filename
-from urllib.request import urlopen
-import threading
-from pathlib import Path
-from datetime import timedelta
-import webbrowser
 
 
 @dataclass(frozen=True)
@@ -30,224 +34,375 @@ class DownloadStream:
     has_video: bool
 
 
-def main():
-    # Functions and Callbacks
-    def schedule_on_ui(function, args=None):
-        if closing:
-            return
-        try:
-            app.after(0, function, args or [])
-        except Exception:
-            pass
+class YayTDApp:
+    APP_WIDTH = 800
+    APP_HEIGHT = 700
+    VIDEO_PREVIEW_WIDTH = 160
+    VIDEO_PREVIEW_HEIGHT = 120
+    THUMBNAIL_TIMEOUT = 10
+    DOWNLOAD_TIMEOUT = 30
+    DOWNLOAD_RETRIES = 2
+    THEME_POLL_MS = 3000
 
-    def is_active_load(load_id):
-        return not closing and load_id == current_load_id
+    LIGHT_PALETTE = {
+        "background": "#f5f5f7",
+        "panel": "#ffffff",
+        "foreground": "#1d1d1f",
+        "muted": "#4a4a4f",
+        "link": "#0057d9",
+    }
+    DARK_PALETTE = {
+        "background": "#1c1c1e",
+        "panel": "#2c2c2e",
+        "foreground": "#f5f5f7",
+        "muted": "#c7c7cc",
+        "link": "#64a8ff",
+    }
 
-    def update_load_button_state():
-        if yt_url.value != "" and not loading and active_downloads == 0:
-            load_url_button.enable()
-        else:
-            load_url_button.disable()
+    SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
-    def apply_light_palette():
-        app.tk.call(
-            "tk_setPalette",
-            "background", LIGHT_BG,
-            "foreground", LIGHT_FG,
-            "activeBackground", LIGHT_ACTIVE_BG,
-            "activeForeground", LIGHT_FG,
-            "highlightBackground", LIGHT_BG,
-            "highlightColor", LIGHT_ACCENT,
-            "selectBackground", LIGHT_SELECT_BG,
-            "selectForeground", LIGHT_SELECT_FG,
-            "disabledForeground", LIGHT_DISABLED_FG,
-            "insertBackground", LIGHT_FG,
-            "troughColor", LIGHT_BORDER,
-        )
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("YayTD")
+        self.root.geometry(f"{self.APP_WIDTH}x{self.APP_HEIGHT}")
+        self.root.minsize(self.APP_WIDTH, self.APP_HEIGHT)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    def configure_tk_options(tk_widget, **options):
-        supported_options = set(tk_widget.keys())
-        safe_options = {
-            option: value
-            for option, value in options.items()
-            if option in supported_options
-        }
-        if safe_options:
-            tk_widget.configure(**safe_options)
+        self.style = ttk.Style(self.root)
+        self.theme_mode = None
+        self.closing = False
+        self.loading = False
+        self.active_downloads = 0
+        self.current_load_id = 0
+        self.focus_autopaste_done = False
 
-    def configure_light_widget(widget, *, bg=None, fg=None, input_widget=False):
-        bg = LIGHT_BG if bg is None else bg
-        fg = LIGHT_FG if fg is None else fg
-        widget.bg = bg
-        widget.text_color = fg
-        configure_tk_options(
-            widget.tk,
-            background=bg,
-            foreground=fg,
-            activebackground=LIGHT_ACTIVE_BG,
-            activeforeground=LIGHT_FG,
-            highlightbackground=LIGHT_BORDER,
-            highlightcolor=LIGHT_ACCENT,
-        )
-        if input_widget:
-            input_options = {
-                "background": LIGHT_INPUT_BG,
-                "foreground": LIGHT_FG,
-                "insertbackground": LIGHT_FG,
-                "selectbackground": LIGHT_SELECT_BG,
-                "selectforeground": LIGHT_SELECT_FG,
-                "highlightbackground": LIGHT_BORDER,
-                "highlightcolor": LIGHT_ACCENT,
-            }
-            configure_tk_options(widget.tk, **input_options)
+        self.streams_by_id = {}
+        self.stream_rows = {}
+        self.downloads = {}
+        self.icon_image = None
+        self.thumbnail_image = None
 
-            listbox = getattr(widget, "_listbox", None)
-            if listbox is not None:
-                configure_tk_options(listbox.tk, **input_options)
+        self.url_var = tk.StringVar()
+        self.url_var.trace_add("write", lambda *_: self.update_load_button_state())
 
-            for child in widget.tk.winfo_children():
-                configure_tk_options(
-                    child,
-                    background=LIGHT_INPUT_BG,
-                    activebackground=LIGHT_ACTIVE_BG,
-                    troughcolor=LIGHT_BORDER,
-                    highlightbackground=LIGHT_BORDER,
-                )
+        self.font = self.platform_monospace_font()
 
-    def configure_link(widget):
-        configure_light_widget(widget, fg=LIGHT_LINK)
-        configure_tk_options(widget.tk, cursor="hand2")
+        self.apply_theme(self.detect_theme())
+        self.configure_window_icon()
+        self.create_menu()
+        self.create_widgets()
+        self.create_context_menu()
+        self.bind_events()
+        self.schedule_theme_poll()
 
-    def menu_file_paste():
-        if yt_url.value == "":
+    def platform_monospace_font(self):
+        match sys.platform:
+            case "darwin":
+                return "Monaco"
+            case "win32":
+                return "Consolas"
+            case _:
+                return "DejaVu Sans Mono"
+
+    def configure_window_icon(self):
+        icon_path = Path(__file__).resolve().with_name("yaytd_logo_64.png")
+        if icon_path.exists():
             try:
-                clipboard_text = app.tk.clipboard_get()
-                if "youtu" in clipboard_text:
-                    yt_url.value = clipboard_text
-                    update_load_button_state()
-                    update_status_bar("")
-                else:
-                    update_status_bar("Not a valid YouTube URL")
-            except Exception:
+                self.icon_image = tk.PhotoImage(file=icon_path.as_posix())
+                self.root.iconphoto(True, self.icon_image)
+            except tk.TclError:
                 pass
 
-    def menu_file_exit():
-        on_app_close()
+    def create_menu(self):
+        self.menu_bar = Menu(self.root)
 
-    def on_app_close():
-        nonlocal closing
-        closing = True
+        file_menu = Menu(self.menu_bar, tearoff=False)
+        file_menu.add_command(label="Paste", command=self.menu_file_paste)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.on_close)
+        self.menu_bar.add_cascade(label="File", menu=file_menu)
+
+        help_menu = Menu(self.menu_bar, tearoff=False)
+        help_menu.add_command(label="About", command=self.open_about_window)
+        self.menu_bar.add_cascade(label="Help", menu=help_menu)
+
+        self.root.configure(menu=self.menu_bar)
+
+    def create_widgets(self):
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(2, weight=1)
+
+        url_group = ttk.LabelFrame(self.root, text="Youtube video link", padding=10)
+        url_group.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
+        url_group.columnconfigure(0, weight=1)
+
+        self.url_entry = ttk.Entry(url_group, textvariable=self.url_var)
+        self.url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.url_entry.bind("<Return>", lambda _event: self.on_click_load_button())
+        self.url_entry.bind("<Button-2>", self.show_context_menu)
+        self.url_entry.bind("<Button-3>", self.show_context_menu)
+
+        self.load_button = ttk.Button(url_group, text="Load", command=self.on_click_load_button, state=tk.DISABLED)
+        self.load_button.grid(row=0, column=1)
+
+        preview_group = ttk.LabelFrame(self.root, text="Video info", padding=10)
+        preview_group.grid(row=1, column=0, sticky="ew", padx=12, pady=6)
+        preview_group.columnconfigure(2, weight=1)
+
+        self.thumbnail_label = ttk.Label(preview_group, style="Thumbnail.TLabel", anchor=tk.CENTER)
+        self.thumbnail_label.grid(row=0, column=0, rowspan=6, sticky="n", padx=(0, 12))
+        self.set_placeholder_thumbnail()
+
+        ttk.Label(preview_group, text="Title:", style="Muted.TLabel").grid(row=0, column=1, sticky="w")
+        self.video_title = ttk.Label(preview_group, text="", wraplength=560)
+        self.video_title.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(0, 6))
+
+        ttk.Label(preview_group, text="Author:", style="Muted.TLabel").grid(row=2, column=1, sticky="w")
+        self.video_author = ttk.Label(preview_group, text="")
+        self.video_author.grid(row=3, column=1, columnspan=2, sticky="ew", pady=(0, 6))
+
+        ttk.Label(preview_group, text="Duration:", style="Muted.TLabel").grid(row=4, column=1, sticky="w")
+        self.video_duration = ttk.Label(preview_group, text="")
+        self.video_duration.grid(row=5, column=1, columnspan=2, sticky="ew")
+
+        stream_frame = ttk.Frame(self.root, padding=(12, 6))
+        stream_frame.grid(row=2, column=0, sticky="nsew")
+        stream_frame.columnconfigure(0, weight=1)
+        stream_frame.rowconfigure(0, weight=1)
+
+        columns = ("format", "type", "resolution", "fps", "abr", "size", "progress", "tracks")
+        self.stream_tree = ttk.Treeview(
+            stream_frame,
+            columns=columns,
+            show="headings",
+            selectmode="extended",
+            style="Stream.Treeview",
+        )
+        headings = {
+            "format": "Format",
+            "type": "Type",
+            "resolution": "Resolution",
+            "fps": "FPS",
+            "abr": "Audio",
+            "size": "Size",
+            "progress": "Progress",
+            "tracks": "Tracks",
+        }
+        widths = {
+            "format": 72,
+            "type": 96,
+            "resolution": 110,
+            "fps": 58,
+            "abr": 72,
+            "size": 110,
+            "progress": 86,
+            "tracks": 80,
+        }
+        anchors = {
+            "format": tk.CENTER,
+            "type": tk.W,
+            "resolution": tk.E,
+            "fps": tk.E,
+            "abr": tk.E,
+            "size": tk.E,
+            "progress": tk.E,
+            "tracks": tk.CENTER,
+        }
+        for column in columns:
+            self.stream_tree.heading(column, text=headings[column])
+            self.stream_tree.column(column, width=widths[column], minwidth=50, anchor=anchors[column], stretch=column == "type")
+        self.stream_tree.grid(row=0, column=0, sticky="nsew")
+        self.stream_tree.bind("<<TreeviewSelect>>", lambda _event: self.on_stream_selected())
+
+        stream_scrollbar = ttk.Scrollbar(stream_frame, orient=tk.VERTICAL, command=self.stream_tree.yview)
+        stream_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.stream_tree.configure(yscrollcommand=stream_scrollbar.set)
+
+        footer = ttk.Frame(self.root, padding=(12, 6, 12, 12))
+        footer.grid(row=3, column=0, sticky="ew")
+        footer.columnconfigure(0, weight=1)
+
+        self.status_bar = ttk.Label(footer, text="Yet Another YouTube Downloader", style="Status.TLabel")
+        self.status_bar.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+        self.download_button = ttk.Button(footer, text="Download", command=self.on_click_download_button, state=tk.DISABLED)
+        self.download_button.grid(row=0, column=1, sticky="e")
+
+    def create_context_menu(self):
+        self.context_menu = Menu(self.root, tearoff=False)
+        self.context_menu.add_command(label="Paste", command=self.menu_file_paste)
+
+    def bind_events(self):
+        self.root.bind("<FocusIn>", self.on_app_focus)
+
+    def detect_theme(self):
+        return "dark" if darkdetect.isDark() else "light"
+
+    def schedule_theme_poll(self):
+        if self.closing:
+            return
+        detected_theme = self.detect_theme()
+        if detected_theme != self.theme_mode:
+            self.apply_theme(detected_theme)
+        self.root.after(self.THEME_POLL_MS, self.schedule_theme_poll)
+
+    def apply_theme(self, mode):
+        mode = "dark" if mode == "dark" else "light"
+        sv_ttk.set_theme(mode)
+        self.theme_mode = mode
+
+        palette = self.DARK_PALETTE if mode == "dark" else self.LIGHT_PALETTE
+        self.root.configure(background=palette["background"])
+        self.style.configure("TFrame", background=palette["background"])
+        self.style.configure("TLabelframe", background=palette["background"])
+        self.style.configure("TLabelframe.Label", background=palette["background"], foreground=palette["foreground"])
+        self.style.configure("TLabel", background=palette["background"], foreground=palette["foreground"])
+        self.style.configure("Muted.TLabel", background=palette["background"], foreground=palette["muted"])
+        self.style.configure("Status.TLabel", background=palette["background"], foreground=palette["muted"])
+        self.style.configure("Title.TLabel", background=palette["background"], foreground=palette["foreground"], font=("TkDefaultFont", 12, "bold"))
+        self.style.configure("Link.TLabel", background=palette["background"], foreground=palette["link"])
+        self.style.configure("Thumbnail.TLabel", background=palette["panel"], foreground=palette["foreground"])
+        self.style.configure("Stream.Treeview", font=(self.font, 12), rowheight=26)
+        self.style.configure("Stream.Treeview.Heading", font=(self.font, 12, "bold"))
+
+    def set_placeholder_thumbnail(self):
+        image = Image.new("RGB", (self.VIDEO_PREVIEW_WIDTH, self.VIDEO_PREVIEW_HEIGHT), "gray")
+        self.set_thumbnail_image(image)
+
+    def set_thumbnail_image(self, image):
+        image = self.fit_thumbnail(image)
+        self.thumbnail_image = ImageTk.PhotoImage(image)
+        self.thumbnail_label.configure(image=self.thumbnail_image)
+
+    def fit_thumbnail(self, image):
+        image = image.convert("RGB")
+        image.thumbnail((self.VIDEO_PREVIEW_WIDTH, self.VIDEO_PREVIEW_HEIGHT), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGB", (self.VIDEO_PREVIEW_WIDTH, self.VIDEO_PREVIEW_HEIGHT), "gray")
+        offset = (
+            (self.VIDEO_PREVIEW_WIDTH - image.width) // 2,
+            (self.VIDEO_PREVIEW_HEIGHT - image.height) // 2,
+        )
+        canvas.paste(image, offset)
+        return canvas
+
+    def schedule_on_ui(self, function, args=None):
+        if self.closing:
+            return
         try:
-            about_window.cancel(stay_modal)
-        except Exception:
+            self.root.after(0, function, *(args or []))
+        except tk.TclError:
             pass
-        app.destroy()
 
-    def menu_help_about():
-        pos_str = app.tk.geometry().split('+')
-        pos = (int(pos_str[1]), int(pos_str[2]))
-        about_window.tk.geometry(f"{about_window.width}x{about_window.height}+{pos[0] + APP_WIDTH // 2 - about_window.width // 2}+{pos[1] + APP_HEIGHT // 2 - about_window.height // 2}")
-        about_window.repeat(function=stay_modal, args=[about_window], time=100)
-        about_window.show(wait=True)
+    def is_active_load(self, load_id):
+        return not self.closing and load_id == self.current_load_id
 
-    def on_about_close():
-        about_window.cancel(stay_modal)
-        about_window.hide()
-
-    def stay_modal(widget):
-        widget.tk.lift()
-
-    def show_context_menu(event):
+    def menu_file_paste(self):
+        if self.url_var.get():
+            return
         try:
-            context_menu.tk_popup(event.display_x, event.display_y)
-        finally:
-            context_menu.grab_release()
-
-    def url_update():
-        update_load_button_state()
-
-    def on_key_pressed(event):
-        if event.key != "" and len(event.key) == 1 and ord(event.key) == 13:
-            on_click_load_button()
-
-    def on_app_focus(event):
-        if(event.widget == app.tk):
-            app.tk.unbind("<FocusIn>")
-            menu_file_paste()
-
-    def on_click_load_button():
-        nonlocal current_load_id, loading
-        if loading or active_downloads > 0:
+            clipboard_text = self.root.clipboard_get()
+        except tk.TclError:
             return
 
-        current_load_id += 1
-        load_id = current_load_id
-        loading = True
-        stream_list.clear()
-        streams.clear()
-        stream_rows.clear()
-        stream_row_by_id.clear()
-        downloads.clear()
-        download_button.disable()
-        update_load_button_state()
-        video_thumbnail.image = Image.new(mode="RGB", size=(VIDEO_PREVIEW_WIDTH,VIDEO_PREVIEW_HEIGHT), color="gray")
-        video_title.value = ""
-        video_duration.value = ""
-        video_author.value = ""
-        if (yt_url.value):
-            url = yt_url.value
-            t = threading.Thread(target=load_video_url, args=[load_id, url], daemon=True)
-            t.start()
+        if "youtu" in clipboard_text:
+            self.url_var.set(clipboard_text)
+            self.update_status_bar("")
         else:
-            loading = False
-            update_load_button_state()
-            update_status_bar("Paste a valid Youtube video url")
+            self.update_status_bar("Not a valid YouTube URL")
 
-    def load_video_url(load_id, url):
+    def show_context_menu(self, event):
         try:
-            info = extract_video_info(url)
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.context_menu.grab_release()
+
+    def on_app_focus(self, event):
+        if self.focus_autopaste_done or event.widget is not self.root:
+            return
+        self.focus_autopaste_done = True
+        self.menu_file_paste()
+
+    def update_load_button_state(self):
+        if self.url_var.get() and not self.loading and self.active_downloads == 0:
+            self.load_button.configure(state=tk.NORMAL)
+        else:
+            self.load_button.configure(state=tk.DISABLED)
+
+    def on_click_load_button(self):
+        if self.loading or self.active_downloads > 0:
+            return
+
+        url = self.url_var.get().strip()
+        if not url:
+            self.update_status_bar("Paste a valid Youtube video url")
+            return
+
+        self.current_load_id += 1
+        load_id = self.current_load_id
+        self.loading = True
+        self.clear_video()
+        self.update_load_button_state()
+        self.update_status_bar("Loading video...")
+
+        thread = threading.Thread(target=self.load_video_url, args=(load_id, url), daemon=True)
+        thread.start()
+
+    def clear_video(self):
+        self.stream_tree.delete(*self.stream_tree.get_children())
+        self.streams_by_id.clear()
+        self.stream_rows.clear()
+        self.downloads.clear()
+        self.download_button.configure(state=tk.DISABLED)
+        self.set_placeholder_thumbnail()
+        self.video_title.configure(text="")
+        self.video_duration.configure(text="")
+        self.video_author.configure(text="")
+
+    def load_video_url(self, load_id, url):
+        try:
+            info = self.extract_video_info(url)
             title = info.get("title") or "Untitled video"
-            length = int(info.get("duration") or 0)
+            duration = int(info.get("duration") or 0)
             author = info.get("uploader") or info.get("channel") or ""
             thumbnail_url = info.get("thumbnail")
-            schedule_on_ui(update_status_for_load, [load_id, "Searching streams..."])
+            self.schedule_on_ui(self.update_status_for_load, [load_id, "Searching streams..."])
 
             stream_entries = []
             for format_info in info.get("formats") or []:
-                stream = build_download_stream(url, title, format_info)
+                stream = self.build_download_stream(url, title, format_info)
                 if stream is not None:
-                    stream_entries.append((stream, build_stream_row(stream)))
+                    stream_entries.append((stream, self.build_stream_row(stream)))
 
             if not stream_entries:
                 raise ValueError("No downloadable streams found")
 
-            schedule_on_ui(apply_loaded_streams, [load_id, title, length, author, stream_entries])
+            self.schedule_on_ui(self.apply_loaded_streams, [load_id, title, duration, author, stream_entries])
 
             if thumbnail_url:
                 try:
-                    thumbnail = load_thumbnail(thumbnail_url)
-                    schedule_on_ui(update_thumbnail, [load_id, thumbnail])
+                    thumbnail = self.load_thumbnail(thumbnail_url)
+                    self.schedule_on_ui(self.update_thumbnail, [load_id, thumbnail])
                 except Exception:
-                    schedule_on_ui(update_thumbnail_error, [load_id])
+                    self.schedule_on_ui(self.update_thumbnail_error, [load_id])
         except Exception as error:
-            schedule_on_ui(load_video_failed, [load_id, str(error)])
+            self.schedule_on_ui(self.load_video_failed, [load_id, str(error)])
 
-    def extract_video_info(url):
-        with YoutubeDL(ydl_base_options()) as ydl:
+    def extract_video_info(self, url):
+        with YoutubeDL(self.ydl_base_options()) as ydl:
             return ydl.extract_info(url, download=False)
 
-    def ydl_base_options():
+    def ydl_base_options(self):
         return {
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
             "allowed_extractors": ["youtube"],
-            "socket_timeout": DOWNLOAD_TIMEOUT,
-            "retries": DOWNLOAD_RETRIES,
-            "fragment_retries": DOWNLOAD_RETRIES,
+            "socket_timeout": self.DOWNLOAD_TIMEOUT,
+            "retries": self.DOWNLOAD_RETRIES,
+            "fragment_retries": self.DOWNLOAD_RETRIES,
         }
 
-    def build_download_stream(video_url, title, format_info):
+    def build_download_stream(self, video_url, title, format_info):
         format_id = str(format_info.get("format_id") or "")
         if not format_id:
             return None
@@ -288,27 +443,7 @@ def main():
             has_video=has_video,
         )
 
-    def stream_selected():
-        if active_downloads == 0:
-            download_button.enable()
-
-    def make_download_progress_hook(format_id):
-        def download_progress(progress):
-            status = progress.get("status")
-            if status == "finished":
-                schedule_on_ui(update_stream_list, [format_id, 100])
-                return
-            if status != "downloading":
-                return
-
-            downloaded = progress.get("downloaded_bytes") or 0
-            total = progress.get("total_bytes") or progress.get("total_bytes_estimate")
-            if total:
-                schedule_on_ui(update_stream_list, [format_id, (100 * downloaded) / total])
-
-        return download_progress
-
-    def build_stream_row(stream):
+    def build_stream_row(self, stream):
         return {
             "format_id": stream.format_id,
             "mime_type": stream.mime_type or "",
@@ -320,283 +455,245 @@ def main():
             "has_video": stream.has_video,
         }
 
-    def format_stream_row(row, percent=None):
-        progress = f"{percent:>4.0f}%" if percent is not None else "     "
-        filesize = f"{row['filesize_mb']:>10.2f} Mb" if row["filesize_mb"] is not None else f"{'unknown':>13}"
-        audio = "🎧" if row["has_audio"] else ""
-        video = "🎬" if row["has_video"] else ""
+    def format_tree_values(self, row, percent=None):
+        filesize = f"{row['filesize_mb']:.2f} Mb" if row["filesize_mb"] is not None else "unknown"
+        progress = f"{percent:.0f}%" if percent is not None else ""
+        tracks = []
+        if row["has_audio"]:
+            tracks.append("🎧")
+        if row["has_video"]:
+            tracks.append("🎬")
         return (
-            f"{row['format_id'][:6]:>6}  "
-            f"{row['mime_type']:<10}"
-            f"{row['resolution']:>8}"
-            f"{row['fps']:>5}"
-            f"{row['abr']:>10}"
-            f"{filesize}"
-            f"{progress:>7}"
-            f"{audio:>4}"
-            f"{video:>2}"
+            row["format_id"],
+            row["mime_type"],
+            row["resolution"],
+            row["fps"],
+            row["abr"],
+            filesize,
+            progress,
+            " ".join(tracks),
         )
 
-    def apply_loaded_streams(load_id, title, duration, author, stream_entries):
-        nonlocal loading
-        if not is_active_load(load_id):
+    def apply_loaded_streams(self, load_id, title, duration, author, stream_entries):
+        if not self.is_active_load(load_id):
             return
 
-        streams.clear()
-        stream_rows.clear()
-        stream_row_by_id.clear()
-        stream_list.clear()
-        for index, (stream, row) in enumerate(stream_entries):
-            streams.append(stream)
-            stream_rows.append(row)
-            stream_row_by_id[stream.format_id] = index
-            stream_list.append(format_stream_row(row))
+        self.stream_tree.delete(*self.stream_tree.get_children())
+        self.streams_by_id.clear()
+        self.stream_rows.clear()
+        for stream, row in stream_entries:
+            self.streams_by_id[stream.format_id] = stream
+            self.stream_rows[stream.format_id] = row
+            self.stream_tree.insert("", tk.END, iid=stream.format_id, values=self.format_tree_values(row))
 
-        loading = False
-        update_url_info(title, duration, author)
-        update_status_bar(f"Found {len(stream_entries)} streams")
-        update_load_button_state()
+        self.loading = False
+        self.update_url_info(title, duration, author)
+        self.update_status_bar(f"Found {len(stream_entries)} streams")
+        self.update_load_button_state()
 
-    def on_click_download_button():
-        if stream_list.value != None:
-            selected_rows = selected_stream_indexes()
-            if not selected_rows:
-                return
-            if len(selected_rows) == 1:
-                stream = streams[selected_rows[0]]
-                file_name = app.select_file(save=True, filename=f"{stream.format_id}-{stream.default_filename}", folder=Path.home())
-                if file_name:
-                    start_download(stream, file_name)
-            else:
-                folder = app.select_folder(title="Select folder", folder=Path.home())
-                if folder:
-                    for id in selected_rows:
-                        stream = streams[id]
-                        file_name = Path(folder).joinpath(f"{stream.format_id}-{stream.default_filename}")
-                        start_download(stream, file_name)
+    def on_stream_selected(self):
+        if self.active_downloads == 0 and self.stream_tree.selection():
+            self.download_button.configure(state=tk.NORMAL)
+        else:
+            self.download_button.configure(state=tk.DISABLED)
 
-    def selected_stream_indexes():
-        return [
-            stream_list.items.index(item)
-            for item in stream_list.value
-            if item in stream_list.items
-        ]
+    def on_click_download_button(self):
+        selected_ids = list(self.stream_tree.selection())
+        if not selected_ids:
+            return
 
-    def start_download(stream, file_name):
-        nonlocal active_downloads
-        downloads[stream.format_id] = "downloading"
-        active_downloads += 1
-        download_button.disable()
-        update_load_button_state()
-        update_status_bar("Download in progress...")
+        if len(selected_ids) == 1:
+            stream = self.streams_by_id[selected_ids[0]]
+            file_name = filedialog.asksaveasfilename(
+                parent=self.root,
+                initialdir=Path.home(),
+                initialfile=f"{stream.format_id}-{stream.default_filename}",
+            )
+            if file_name:
+                self.start_download(stream, file_name)
+            return
 
-        t = threading.Thread(target=download_stream, args=[stream, file_name], daemon=True)
-        t.start()
+        folder = filedialog.askdirectory(parent=self.root, title="Select folder", initialdir=Path.home())
+        if not folder:
+            return
 
-    def download_stream(stream, file_name):
+        for format_id in selected_ids:
+            stream = self.streams_by_id[format_id]
+            file_name = Path(folder).joinpath(f"{stream.format_id}-{stream.default_filename}")
+            self.start_download(stream, file_name)
+
+    def start_download(self, stream, file_name):
+        self.downloads[stream.format_id] = "downloading"
+        self.active_downloads += 1
+        self.download_button.configure(state=tk.DISABLED)
+        self.update_load_button_state()
+        self.update_status_bar("Download in progress...")
+
+        thread = threading.Thread(target=self.download_stream, args=(stream, file_name), daemon=True)
+        thread.start()
+
+    def download_stream(self, stream, file_name):
         try:
             target = Path(file_name)
-            ydl_options = ydl_base_options()
+            ydl_options = self.ydl_base_options()
             ydl_options.update(
                 {
                     "format": stream.format_id,
                     "outtmpl": target.as_posix(),
-                    "progress_hooks": [make_download_progress_hook(stream.format_id)],
+                    "progress_hooks": [self.make_download_progress_hook(stream.format_id)],
                     "overwrites": True,
                 }
             )
             with YoutubeDL(ydl_options) as ydl:
                 ydl.download([stream.video_url])
-            schedule_on_ui(mark_download_finished, [stream.format_id, True])
+            self.schedule_on_ui(self.mark_download_finished, [stream.format_id, True])
         except Exception:
-            schedule_on_ui(mark_download_finished, [stream.format_id, False])
+            self.schedule_on_ui(self.mark_download_finished, [stream.format_id, False])
 
-    def mark_download_finished(format_id, success):
-        nonlocal active_downloads
-        if downloads.get(format_id) != "downloading":
+    def make_download_progress_hook(self, format_id):
+        def download_progress(progress):
+            status = progress.get("status")
+            if status == "finished":
+                self.schedule_on_ui(self.update_stream_progress, [format_id, 100])
+                return
+            if status != "downloading":
+                return
+
+            downloaded = progress.get("downloaded_bytes") or 0
+            total = progress.get("total_bytes") or progress.get("total_bytes_estimate")
+            if total:
+                self.schedule_on_ui(self.update_stream_progress, [format_id, (100 * downloaded) / total])
+
+        return download_progress
+
+    def mark_download_finished(self, format_id, success):
+        if self.downloads.get(format_id) != "downloading":
             return
 
-        downloads[format_id] = "completed" if success else "failed"
-        active_downloads = max(0, active_downloads - 1)
-        completed = sum(1 for state in downloads.values() if state == "completed")
-        total = len(downloads)
+        self.downloads[format_id] = "completed" if success else "failed"
+        self.active_downloads = max(0, self.active_downloads - 1)
+        completed = sum(1 for state in self.downloads.values() if state == "completed")
+        total = len(self.downloads)
         if success:
-            update_status_bar(f"Download {completed}/{total} completed")
+            self.update_status_bar(f"Download {completed}/{total} completed")
         else:
-            update_status_bar(f"Download failed ({completed}/{total} completed)")
+            self.update_status_bar(f"Download failed ({completed}/{total} completed)")
 
-        if active_downloads == 0:
-            update_load_button_state()
-            if stream_list.value:
-                download_button.enable()
-    
-    def update_url_info(title, duration, author):
-        video_title.value = title
-        video_duration.value = f"{timedelta(seconds=duration)}"
-        video_author.value = author
+        if self.active_downloads == 0:
+            self.update_load_button_state()
+            self.on_stream_selected()
 
-    def update_stream_list(format_id, percent):
-        if downloads.get(format_id) != "downloading":
+    def update_url_info(self, title, duration, author):
+        self.video_title.configure(text=title)
+        self.video_duration.configure(text=str(timedelta(seconds=duration)))
+        self.video_author.configure(text=author)
+
+    def update_stream_progress(self, format_id, percent):
+        if self.downloads.get(format_id) != "downloading":
             return
-        id = stream_row_by_id.get(format_id)
-        if id is None or id >= len(stream_list.items):
+        if not self.stream_tree.exists(format_id):
             return
-        stream_list.remove(stream_list.items[id])
-        stream_list.insert(id, format_stream_row(stream_rows[id], percent))
+        row = self.stream_rows.get(format_id)
+        if row is None:
+            return
+        self.stream_tree.item(format_id, values=self.format_tree_values(row, percent))
 
-    def load_thumbnail(thumbnail_url):
-        with urlopen(thumbnail_url, timeout=THUMBNAIL_TIMEOUT) as response:
+    def load_thumbnail(self, thumbnail_url):
+        with urlopen(thumbnail_url, timeout=self.THUMBNAIL_TIMEOUT, context=self.SSL_CONTEXT) as response:
             image = Image.open(response)
             image.load()
             return image.copy()
 
-    def update_thumbnail(load_id, thumbnail):
-        if is_active_load(load_id):
-            video_thumbnail.image = thumbnail
+    def update_thumbnail(self, load_id, thumbnail):
+        if self.is_active_load(load_id):
+            self.set_thumbnail_image(thumbnail)
 
-    def update_thumbnail_error(load_id):
-        if is_active_load(load_id):
-            update_status_bar("Can't load video thumbnail")
+    def update_thumbnail_error(self, load_id):
+        if self.is_active_load(load_id):
+            self.update_status_bar("Can't load video thumbnail")
 
-    def update_status_for_load(load_id, message):
-        if is_active_load(load_id):
-            update_status_bar(message)
+    def update_status_for_load(self, load_id, message):
+        if self.is_active_load(load_id):
+            self.update_status_bar(message)
 
-    def load_video_failed(load_id, error_message):
-        nonlocal loading
-        if not is_active_load(load_id):
+    def load_video_failed(self, load_id, error_message):
+        if not self.is_active_load(load_id):
             return
-        loading = False
-        update_status_bar(f"Can't load video: {error_message}")
-        update_load_button_state()
+        self.loading = False
+        self.update_status_bar(f"Can't load video: {error_message}")
+        self.update_load_button_state()
 
-    def update_status_bar(message):
-        status_bar.value = message
+    def update_status_bar(self, message):
+        self.status_bar.configure(text=message)
 
-    # Variables
-    streams = []
-    stream_rows = []
-    stream_row_by_id = {}
-    downloads = {}
-    current_load_id = 0
-    loading = False
-    active_downloads = 0
-    closing = False
-    LIGHT_BG = "#f5f5f7"
-    LIGHT_PANEL_BG = "#ffffff"
-    LIGHT_INPUT_BG = "#ffffff"
-    LIGHT_FG = "#1d1d1f"
-    LIGHT_MUTED_FG = "#4a4a4f"
-    LIGHT_DISABLED_FG = "#8e8e93"
-    LIGHT_ACTIVE_BG = "#e5e5ea"
-    LIGHT_BORDER = "#d1d1d6"
-    LIGHT_SELECT_BG = "#0a84ff"
-    LIGHT_SELECT_FG = "#ffffff"
-    LIGHT_ACCENT = "#007aff"
-    LIGHT_LINK = "#0057d9"
-    APP_WIDTH = 800
-    APP_HEIGHT = 700
-    VIDEO_PREVIEW_WIDTH = 160
-    VIDEO_PREVIEW_HEIGHT = 120
-    THUMBNAIL_TIMEOUT = 10
-    DOWNLOAD_TIMEOUT = 30
-    DOWNLOAD_RETRIES = 2
-    FONT = None
+    def open_about_window(self):
+        about = tk.Toplevel(self.root)
+        about.title("About")
+        about.resizable(False, False)
+        about.transient(self.root)
+        about.grab_set()
 
-    match sys.platform:
-        case "darwin":
-            FONT = "Monaco"
-        case "win32":
-            FONT = "Consolas"
-        case "linux":
-            FONT = "DejaVu Sans Mono"
+        frame = ttk.Frame(about, padding=18)
+        frame.grid(row=0, column=0, sticky="nsew")
 
-    # App
-    app = App(title="YayTD", width=APP_WIDTH, height=APP_HEIGHT, bg=LIGHT_BG)
-    app.icon = Path(__file__).resolve().with_name("yaytd_logo_64.png").as_posix()
-    app.tk.minsize(APP_WIDTH, APP_HEIGHT)
-    apply_light_palette()
+        icon_path = Path(__file__).resolve().with_name("yaytd_logo_64.png")
+        about.icon_image = None
+        if icon_path.exists():
+            try:
+                about.icon_image = tk.PhotoImage(file=icon_path.as_posix())
+                ttk.Label(frame, image=about.icon_image).grid(row=0, column=0, columnspan=3, pady=(0, 8))
+            except tk.TclError:
+                pass
 
-    # Widgets
-    main_menu = MenuBar(app, toplevel=["File", "Help"], options=[[["Paste", menu_file_paste],["Exit", menu_file_exit]],[["About",menu_help_about]]])
+        ttk.Label(frame, text="YayTD", style="Title.TLabel").grid(row=1, column=0, columnspan=3, pady=(0, 8))
 
-    title_box_input = TitleBox(app, text="Youtube video link", width="fill")
-    configure_light_widget(title_box_input, bg=LIGHT_PANEL_BG)
-    input_box = Box(title_box_input, align="top", width="fill")
-    input_box.bg = LIGHT_PANEL_BG
-    yt_url = TextBox(input_box, align="left", width="fill", command=url_update)
-    configure_light_widget(yt_url, input_widget=True)
-    yt_url.when_right_button_pressed = show_context_menu
-    yt_url.when_key_pressed = on_key_pressed
-    load_url_button = PushButton(input_box, on_click_load_button, text="Load", align="left", enabled=False)
-    configure_light_widget(load_url_button, bg=LIGHT_ACTIVE_BG)
+        github_link = ttk.Label(frame, text="https://github.com/frenchfaso/yaytd", style="Link.TLabel", cursor="hand2")
+        github_link.grid(row=2, column=0, columnspan=3, pady=(0, 12))
+        github_link.bind("<Button-1>", lambda _event: webbrowser.open("https://github.com/frenchfaso/yaytd"))
 
-    title_video_preview = TitleBox(app, text="Video info", width="fill")
-    configure_light_widget(title_video_preview, bg=LIGHT_PANEL_BG)
-    box_preview = Box(title_video_preview, layout="grid", align="left")
-    box_preview.bg = LIGHT_PANEL_BG
-    video_thumbnail = Picture(box_preview, grid=[0,0,1,6], width=VIDEO_PREVIEW_WIDTH, height=VIDEO_PREVIEW_HEIGHT, image=Image.new(mode="RGB", size=(VIDEO_PREVIEW_WIDTH,VIDEO_PREVIEW_HEIGHT), color="gray"), align="top")
-    spacer = Box(box_preview, grid=[1,0], width=15, height="fill")
-    spacer.bg = LIGHT_PANEL_BG
-    title_label = Text(box_preview, grid=[2,0], text="Title:", align="left", bg=LIGHT_PANEL_BG, color=LIGHT_MUTED_FG)
-    video_title = Text(box_preview, grid=[2,1], align="left")
-    configure_light_widget(video_title, bg=LIGHT_PANEL_BG)
-    author_label = Text(box_preview,grid=[2,2], text="Author:", align="left", bg=LIGHT_PANEL_BG, color=LIGHT_MUTED_FG)
-    video_author = Text(box_preview,grid=[2,3], align="left")
-    configure_light_widget(video_author, bg=LIGHT_PANEL_BG)
-    duration_label = Text(box_preview, grid=[2,4], text="Duration:", align="left", bg=LIGHT_PANEL_BG, color=LIGHT_MUTED_FG)
-    video_duration = Text(box_preview, grid=[2,5], align="left")
-    configure_light_widget(video_duration, bg=LIGHT_PANEL_BG)
+        ttk.Label(
+            frame,
+            text="Yet Another YouTube Downloader\nis a simple GUI built on top of 'yt-dlp'\nwith 'tkinter.ttk' and 'sv-ttk'",
+            justify=tk.CENTER,
+        ).grid(row=3, column=0, columnspan=3, pady=(0, 12))
 
-    stream_list = ListBox(app, width="fill", height="fill", scrollbar=True, command=stream_selected, multiselect=True)
-    configure_light_widget(stream_list, input_widget=True)
-    stream_list.text_size = 12
-    stream_list.font = FONT
-    box_bottom = Box(app, align="bottom", width="fill")
-    box_bottom.bg = LIGHT_BG
-    status_bar = Text(box_bottom, text="Yet Another YouTube Downloader", align="left")
-    configure_light_widget(status_bar, bg=LIGHT_BG)
-    download_button = PushButton(box_bottom, command=on_click_download_button, text="Download", enabled=False, align="right")
-    configure_light_widget(download_button, bg=LIGHT_ACTIVE_BG)
+        self.create_about_link(frame, "yt-dlp", "https://github.com/yt-dlp/yt-dlp", 0)
+        self.create_about_link(frame, "sv-ttk", "https://github.com/rdbende/Sun-Valley-ttk-theme", 1)
+        self.create_about_link(frame, "tkinter", "https://docs.python.org/3/library/tkinter.html", 2)
 
-    # TK Widgets
-    context_menu = Menu(input_box.tk, tearoff = 0)
-    context_menu.add_command(label ="Paste", command=menu_file_paste)
+        ttk.Button(frame, text="Close", command=about.destroy).grid(row=5, column=0, columnspan=3, pady=(16, 0))
 
-    # Windows
-    about_window = Window(app, title="About", visible=False, width=320, height=240, bg=LIGHT_BG)
-    about_window.tk.resizable(0,0)
-    box = Box(about_window, align="left", width="fill")
-    box.bg = LIGHT_BG
-    close_button = PushButton(box, command=lambda : about_window._close_window(), text="Close", align="bottom")
-    configure_light_widget(close_button, bg=LIGHT_ACTIVE_BG)
-    Picture(box, image=Path(__file__).resolve().with_name("yaytd_logo_64.png").as_posix())
-    about_title = Text(box, "YayTD", size=12)
-    configure_light_widget(about_title)
-    about_title.tk.configure(font=("bold"))
-    yaytd_gh_link = Text(box, "https://github.com/frenchfaso/yaytd", color=LIGHT_LINK)
-    yaytd_gh_link.when_clicked = lambda _ : webbrowser.open("https://github.com/frenchfaso/yaytd")
-    configure_link(yaytd_gh_link)
-    about_text = Text(box, "Yet Another YouTube Downloader\nis a simple GUI built on top of 'yt-dlp'\nwith 'guizero' and a little bit of 'tkinter'", size=10)
-    configure_light_widget(about_text)
-    box_links = Box(box)
-    box_links.bg = LIGHT_BG
-    ytdlp_link = Text(box_links, text="yt-dlp", color=LIGHT_LINK, align="left")
-    ytdlp_link.when_clicked = lambda _ : webbrowser.open("https://github.com/yt-dlp/yt-dlp")
-    configure_link(ytdlp_link)
-    guizero_link = Text(box_links, "guizero", color=LIGHT_LINK, align="left")
-    guizero_link.when_clicked = lambda _ : webbrowser.open("https://lawsie.github.io/guizero/")
-    configure_link(guizero_link)
-    tkinter_link = Text(box_links, "tkinter", color=LIGHT_LINK, align="left")
-    tkinter_link.when_clicked = lambda _ : webbrowser.open("https://docs.python.org/3/library/tkinter.html")
-    configure_link(tkinter_link)
-    about_window.when_closed = on_about_close
+        self.center_window(about, 360, 260)
+        about.wait_window()
 
-    app.tk.bind("<FocusIn>", on_app_focus)
-    app.when_closed = on_app_close
+    def create_about_link(self, frame, text, url, column):
+        label = ttk.Label(frame, text=text, style="Link.TLabel", cursor="hand2")
+        label.grid(row=4, column=column, padx=8)
+        label.bind("<Button-1>", lambda _event: webbrowser.open(url))
 
-    app.display()
+    def center_window(self, window, width, height):
+        self.root.update_idletasks()
+        root_x = self.root.winfo_rootx()
+        root_y = self.root.winfo_rooty()
+        root_width = self.root.winfo_width()
+        root_height = self.root.winfo_height()
+        x = root_x + (root_width - width) // 2
+        y = root_y + (root_height - height) // 2
+        window.geometry(f"{width}x{height}+{x}+{y}")
 
-if(__name__ == "__main__"):
-    os.environ['SSL_CERT_FILE'] = certifi.where()
+    def on_close(self):
+        self.closing = True
+        self.root.destroy()
+
+    def run(self):
+        self.root.mainloop()
+
+
+def main():
+    app = YayTDApp()
+    app.run()
+
+
+if __name__ == "__main__":
+    os.environ["SSL_CERT_FILE"] = certifi.where()
     main()
