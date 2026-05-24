@@ -1,7 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-
-block_cipher = None
+from PyInstaller.utils.hooks import collect_submodules
 
 
 a = Analysis(
@@ -9,25 +8,21 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('yaytd_logo_64.png', '.')],
-    hiddenimports=['PIL._tkinter_finder'],
+    hiddenimports=['PIL._tkinter_finder'] + collect_submodules('yt_dlp'),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
+    optimize=0,
 )
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='yaytd',
     debug=False,
     bootloader_ignore_signals=False,
@@ -43,9 +38,21 @@ exe = EXE(
     entitlements_file=None,
     icon=['yaytd.icns'],
 )
-app = BUNDLE(
+coll = COLLECT(
     exe,
+    a.binaries,
+    a.datas,
+    strip=True,
+    upx=True,
+    upx_exclude=[],
+    name='yaytd',
+)
+app = BUNDLE(
+    coll,
     name='yaytd.app',
     icon='yaytd.icns',
     bundle_identifier=None,
+    info_plist={
+        'NSRequiresAquaSystemAppearance': True,
+    },
 )
