@@ -460,9 +460,9 @@ class YayTDApp:
         progress = f"{percent:.0f}%" if percent is not None else ""
         tracks = []
         if row["has_audio"]:
-            tracks.append("audio")
+            tracks.append("🎧")
         if row["has_video"]:
-            tracks.append("video")
+            tracks.append("🎬")
         return (
             row["format_id"],
             row["mime_type"],
@@ -471,7 +471,7 @@ class YayTDApp:
             row["abr"],
             filesize,
             progress,
-            " + ".join(tracks),
+            " ".join(tracks),
         )
 
     def apply_loaded_streams(self, load_id, title, duration, author, stream_entries):
