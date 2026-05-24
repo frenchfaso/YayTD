@@ -17,7 +17,7 @@ import darkdetect
 from PIL import Image, ImageTk
 import sv_ttk
 from yt_dlp import YoutubeDL
-from yt_dlp.utils import sanitize_filename
+from yt_dlp.utils import DownloadCancelled, sanitize_filename
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,7 @@ class YayTDApp:
     DOWNLOAD_TIMEOUT = 30
     DOWNLOAD_RETRIES = 2
     THEME_POLL_MS = 3000
+    ACTIVE_DOWNLOAD_STATES = {"downloading", "cancelling"}
 
     LIGHT_PALETTE = {
         "background": "#f5f5f7",
@@ -79,6 +80,7 @@ class YayTDApp:
         self.streams_by_id = {}
         self.stream_rows = {}
         self.downloads = {}
+        self.download_cancel_events = {}
         self.icon_image = None
         self.thumbnail_image = None
 
@@ -170,7 +172,7 @@ class YayTDApp:
         stream_frame.columnconfigure(0, weight=1)
         stream_frame.rowconfigure(0, weight=1)
 
-        columns = ("format", "type", "resolution", "fps", "abr", "size", "progress", "tracks")
+        columns = ("format", "type", "resolution", "fps", "abr", "size", "progress", "tracks", "action")
         self.stream_tree = ttk.Treeview(
             stream_frame,
             columns=columns,
@@ -187,6 +189,7 @@ class YayTDApp:
             "size": "Size",
             "progress": "Progress",
             "tracks": "Tracks",
+            "action": "Cancel",
         }
         widths = {
             "format": 72,
@@ -197,6 +200,7 @@ class YayTDApp:
             "size": 110,
             "progress": 86,
             "tracks": 80,
+            "action": 64,
         }
         anchors = {
             "format": tk.CENTER,
@@ -207,12 +211,15 @@ class YayTDApp:
             "size": tk.E,
             "progress": tk.E,
             "tracks": tk.CENTER,
+            "action": tk.CENTER,
         }
         for column in columns:
             self.stream_tree.heading(column, text=headings[column])
             self.stream_tree.column(column, width=widths[column], minwidth=50, anchor=anchors[column], stretch=column == "type")
         self.stream_tree.grid(row=0, column=0, sticky="nsew")
         self.stream_tree.bind("<<TreeviewSelect>>", lambda _event: self.on_stream_selected())
+        self.stream_tree.bind("<Button-1>", self.on_stream_tree_click)
+        self.stream_tree.bind("<Motion>", self.on_stream_tree_motion)
 
         stream_scrollbar = ttk.Scrollbar(stream_frame, orient=tk.VERTICAL, command=self.stream_tree.yview)
         stream_scrollbar.grid(row=0, column=1, sticky="ns")
@@ -352,6 +359,7 @@ class YayTDApp:
         self.streams_by_id.clear()
         self.stream_rows.clear()
         self.downloads.clear()
+        self.download_cancel_events.clear()
         self.download_button.configure(state=tk.DISABLED)
         self.set_placeholder_thumbnail()
         self.video_title.configure(text="")
@@ -455,9 +463,9 @@ class YayTDApp:
             "has_video": stream.has_video,
         }
 
-    def format_tree_values(self, row, percent=None):
+    def format_tree_values(self, row, percent=None, progress_label=None, action_label=""):
         filesize = f"{row['filesize_mb']:.2f} Mb" if row["filesize_mb"] is not None else "unknown"
-        progress = f"{percent:.0f}%" if percent is not None else ""
+        progress = progress_label if progress_label is not None else f"{percent:.0f}%" if percent is not None else ""
         tracks = []
         if row["has_audio"]:
             tracks.append("🎧")
@@ -472,6 +480,7 @@ class YayTDApp:
             filesize,
             progress,
             " ".join(tracks),
+            action_label,
         )
 
     def apply_loaded_streams(self, load_id, title, duration, author, stream_entries):
@@ -492,10 +501,43 @@ class YayTDApp:
         self.update_load_button_state()
 
     def on_stream_selected(self):
-        if self.active_downloads == 0 and self.stream_tree.selection():
+        selected_ids = list(self.stream_tree.selection())
+
+        if self.active_downloads == 0 and selected_ids:
             self.download_button.configure(state=tk.NORMAL)
         else:
             self.download_button.configure(state=tk.DISABLED)
+
+    def on_stream_tree_click(self, event):
+        row_id = self.stream_tree.identify_row(event.y)
+        column_name = self.identify_stream_tree_column(event.x)
+        if row_id and column_name == "action" and self.downloads.get(row_id) == "downloading":
+            self.request_cancel_download(row_id)
+            self.update_status_bar("Cancelling download...")
+            return "break"
+        return None
+
+    def on_stream_tree_motion(self, event):
+        row_id = self.stream_tree.identify_row(event.y)
+        column_name = self.identify_stream_tree_column(event.x)
+        if row_id and column_name == "action" and self.downloads.get(row_id) == "downloading":
+            self.stream_tree.configure(cursor="hand2")
+        else:
+            self.stream_tree.configure(cursor="")
+
+    def identify_stream_tree_column(self, x_position):
+        column_id = self.stream_tree.identify_column(x_position)
+        if not column_id.startswith("#"):
+            return None
+        try:
+            column_index = int(column_id[1:]) - 1
+        except ValueError:
+            return None
+
+        columns = self.stream_tree["columns"]
+        if 0 <= column_index < len(columns):
+            return columns[column_index]
+        return None
 
     def on_click_download_button(self):
         selected_ids = list(self.stream_tree.selection())
@@ -522,17 +564,34 @@ class YayTDApp:
             file_name = Path(folder).joinpath(f"{stream.format_id}-{stream.default_filename}")
             self.start_download(stream, file_name)
 
+    def request_cancel_download(self, format_id):
+        if self.downloads.get(format_id) != "downloading":
+            return
+
+        cancel_event = self.download_cancel_events.get(format_id)
+        if cancel_event is not None:
+            cancel_event.set()
+
+        self.downloads[format_id] = "cancelling"
+        self.update_stream_progress(format_id, progress_label="Cancelling", action_label="", force=True)
+        self.stream_tree.configure(cursor="")
+
     def start_download(self, stream, file_name):
+        cancel_event = threading.Event()
         self.downloads[stream.format_id] = "downloading"
+        self.download_cancel_events[stream.format_id] = cancel_event
         self.active_downloads += 1
         self.download_button.configure(state=tk.DISABLED)
         self.update_load_button_state()
         self.update_status_bar("Download in progress...")
+        self.update_stream_progress(stream.format_id, 0, action_label="❌")
+        self.on_stream_selected()
 
-        thread = threading.Thread(target=self.download_stream, args=(stream, file_name), daemon=True)
+        thread = threading.Thread(target=self.download_stream, args=(stream, file_name, cancel_event), daemon=True)
         thread.start()
 
-    def download_stream(self, stream, file_name):
+    def download_stream(self, stream, file_name, cancel_event):
+        temp_files = set()
         try:
             target = Path(file_name)
             ydl_options = self.ydl_base_options()
@@ -540,18 +599,28 @@ class YayTDApp:
                 {
                     "format": stream.format_id,
                     "outtmpl": target.as_posix(),
-                    "progress_hooks": [self.make_download_progress_hook(stream.format_id)],
+                    "progress_hooks": [self.make_download_progress_hook(stream.format_id, cancel_event, temp_files)],
                     "overwrites": True,
                 }
             )
             with YoutubeDL(ydl_options) as ydl:
                 ydl.download([stream.video_url])
-            self.schedule_on_ui(self.mark_download_finished, [stream.format_id, True])
+            self.schedule_on_ui(self.mark_download_finished, [stream.format_id, "completed"])
+        except DownloadCancelled:
+            self.cleanup_temp_files(temp_files)
+            self.schedule_on_ui(self.mark_download_finished, [stream.format_id, "cancelled"])
         except Exception:
-            self.schedule_on_ui(self.mark_download_finished, [stream.format_id, False])
+            self.schedule_on_ui(self.mark_download_finished, [stream.format_id, "failed"])
 
-    def make_download_progress_hook(self, format_id):
+    def make_download_progress_hook(self, format_id, cancel_event, temp_files):
         def download_progress(progress):
+            tmpfilename = progress.get("tmpfilename")
+            if tmpfilename:
+                temp_files.add(tmpfilename)
+
+            if cancel_event.is_set():
+                raise DownloadCancelled("Download cancelled by user")
+
             status = progress.get("status")
             if status == "finished":
                 self.schedule_on_ui(self.update_stream_progress, [format_id, 100])
@@ -566,37 +635,59 @@ class YayTDApp:
 
         return download_progress
 
-    def mark_download_finished(self, format_id, success):
-        if self.downloads.get(format_id) != "downloading":
+    def cleanup_temp_files(self, temp_files):
+        for temp_file in temp_files:
+            try:
+                Path(temp_file).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def mark_download_finished(self, format_id, result):
+        if self.downloads.get(format_id) not in self.ACTIVE_DOWNLOAD_STATES:
             return
 
-        self.downloads[format_id] = "completed" if success else "failed"
+        self.downloads[format_id] = result
+        self.download_cancel_events.pop(format_id, None)
         self.active_downloads = max(0, self.active_downloads - 1)
-        completed = sum(1 for state in self.downloads.values() if state == "completed")
-        total = len(self.downloads)
-        if success:
-            self.update_status_bar(f"Download {completed}/{total} completed")
+
+        if result == "completed":
+            self.update_stream_progress(format_id, 100, action_label="", force=True)
+        elif result == "cancelled":
+            self.update_stream_progress(format_id, progress_label="Cancelled", action_label="", force=True)
         else:
-            self.update_status_bar(f"Download failed ({completed}/{total} completed)")
+            self.update_stream_progress(format_id, progress_label="Failed", action_label="", force=True)
+
+        completed = sum(1 for state in self.downloads.values() if state == "completed")
+        cancelled = sum(1 for state in self.downloads.values() if state == "cancelled")
+        failed = sum(1 for state in self.downloads.values() if state == "failed")
+        total = len(self.downloads)
+        details = [f"{completed}/{total} completed"]
+        if cancelled:
+            details.append(f"{cancelled} cancelled")
+        if failed:
+            details.append(f"{failed} failed")
+        self.update_status_bar(f"Downloads: {', '.join(details)}")
 
         if self.active_downloads == 0:
             self.update_load_button_state()
-            self.on_stream_selected()
+        self.on_stream_selected()
 
     def update_url_info(self, title, duration, author):
         self.video_title.configure(text=title)
         self.video_duration.configure(text=str(timedelta(seconds=duration)))
         self.video_author.configure(text=author)
 
-    def update_stream_progress(self, format_id, percent):
-        if self.downloads.get(format_id) != "downloading":
+    def update_stream_progress(self, format_id, percent=None, progress_label=None, action_label=None, force=False):
+        if not force and self.downloads.get(format_id) != "downloading":
             return
         if not self.stream_tree.exists(format_id):
             return
         row = self.stream_rows.get(format_id)
         if row is None:
             return
-        self.stream_tree.item(format_id, values=self.format_tree_values(row, percent))
+        if action_label is None:
+            action_label = "❌" if self.downloads.get(format_id) == "downloading" else ""
+        self.stream_tree.item(format_id, values=self.format_tree_values(row, percent, progress_label, action_label))
 
     def load_thumbnail(self, thumbnail_url):
         with urlopen(thumbnail_url, timeout=self.THUMBNAIL_TIMEOUT, context=self.SSL_CONTEXT) as response:
@@ -683,6 +774,8 @@ class YayTDApp:
 
     def on_close(self):
         self.closing = True
+        for cancel_event in self.download_cancel_events.values():
+            cancel_event.set()
         self.root.destroy()
 
     def run(self):
