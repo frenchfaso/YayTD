@@ -93,6 +93,7 @@ jobs:
         run: |
           cat > release-notes.md <<'EOF'
           Updates:
+          - fixed YouTube video links that include playlist/radio query parameters
           - migrated the UI to tkinter.ttk with sv-ttk automatic light/dark theme support
           - switched YouTube extraction/downloads to yt-dlp
           - added per-stream download cancellation
