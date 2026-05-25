@@ -10,6 +10,7 @@ from pathlib import Path
 from tkinter import Menu, filedialog
 import tkinter as tk
 from tkinter import ttk
+from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen
 
 import certifi
@@ -343,6 +344,7 @@ class YayTDApp:
         if not url:
             self.update_status_bar("Paste a valid Youtube video url")
             return
+        url = self.normalize_video_url(url)
 
         self.current_load_id += 1
         load_id = self.current_load_id
@@ -398,6 +400,27 @@ class YayTDApp:
     def extract_video_info(self, url):
         with YoutubeDL(self.ydl_base_options()) as ydl:
             return ydl.extract_info(url, download=False)
+
+    @staticmethod
+    def normalize_video_url(url):
+        parsed = urlparse(url.strip())
+        host = parsed.netloc.lower().removeprefix("www.")
+        path_parts = [part for part in parsed.path.split("/") if part]
+        video_id = None
+
+        if host == "youtu.be" and path_parts:
+            video_id = path_parts[0]
+        elif host in {"youtube.com", "m.youtube.com", "music.youtube.com"}:
+            if parsed.path == "/watch":
+                video_id = (parse_qs(parsed.query).get("v") or [None])[0]
+            elif len(path_parts) >= 2 and path_parts[0] in {"shorts", "live", "embed"}:
+                video_id = path_parts[1]
+        elif host == "youtube-nocookie.com" and len(path_parts) >= 2 and path_parts[0] == "embed":
+            video_id = path_parts[1]
+
+        if video_id:
+            return f"https://youtu.be/{video_id}"
+        return url
 
     def ydl_base_options(self):
         return {
