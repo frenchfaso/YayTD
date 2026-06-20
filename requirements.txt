@@ -7,4 +7,4 @@ pyinstaller==6.20.0
 pyinstaller-hooks-contrib==2026.5
 setuptools==82.0.1
 sv-ttk==2.6.1
-yt-dlp==2026.3.17
+yt-dlp==2026.6.9
