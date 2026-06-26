@@ -6,6 +6,7 @@ import threading
 import webbrowser
 from dataclasses import dataclass
 from datetime import timedelta
+from importlib.metadata import PackageNotFoundError, version as metadata_version
 from pathlib import Path
 from tkinter import Menu, filedialog
 import tkinter as tk
@@ -17,7 +18,7 @@ import certifi
 import darkdetect
 from PIL import Image, ImageTk
 import sv_ttk
-from yt_dlp import YoutubeDL
+from yt_dlp import YoutubeDL, version as ytdlp_version
 from yt_dlp.utils import DownloadCancelled, sanitize_filename
 
 
@@ -36,6 +37,7 @@ class DownloadStream:
 
 
 class YayTDApp:
+    REPOSITORY_URL = "https://github.com/frenchfaso/YayTD"
     APP_WIDTH = 800
     APP_HEIGHT = 700
     VIDEO_PREVIEW_WIDTH = 160
@@ -108,13 +110,36 @@ class YayTDApp:
                 return "DejaVu Sans Mono"
 
     def configure_window_icon(self):
-        icon_path = Path(__file__).resolve().with_name("yaytd_logo_64.png")
+        icon_path = self.bundled_path("yaytd_logo_64.png")
         if icon_path.exists():
             try:
                 self.icon_image = tk.PhotoImage(file=icon_path.as_posix())
                 self.root.iconphoto(True, self.icon_image)
             except tk.TclError:
                 pass
+
+    @staticmethod
+    def bundled_path(filename):
+        base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        bundled = base_path / filename
+        if bundled.exists():
+            return bundled
+        return Path(__file__).resolve().with_name(filename)
+
+    @classmethod
+    def app_version(cls):
+        try:
+            version = cls.bundled_path("yaytd_version.txt").read_text(encoding="utf-8").strip()
+        except OSError:
+            version = ""
+        return version or os.environ.get("YAYTD_VERSION", "").strip().removeprefix("v") or "development"
+
+    @staticmethod
+    def package_version(package_name):
+        try:
+            return metadata_version(package_name)
+        except PackageNotFoundError:
+            return "unknown"
 
     def create_menu(self):
         self.menu_bar = Menu(self.root)
@@ -242,6 +267,15 @@ class YayTDApp:
 
     def bind_events(self):
         self.root.bind("<FocusIn>", self.on_app_focus)
+        self.configure_platform_commands()
+
+    def configure_platform_commands(self):
+        if sys.platform != "darwin":
+            return
+        try:
+            self.root.createcommand("tkAboutDialog", self.open_about_window)
+        except tk.TclError:
+            pass
 
     def detect_theme(self):
         return "dark" if darkdetect.isDark() else "light"
@@ -268,6 +302,8 @@ class YayTDApp:
         self.style.configure("Muted.TLabel", background=palette["background"], foreground=palette["muted"])
         self.style.configure("Status.TLabel", background=palette["background"], foreground=palette["muted"])
         self.style.configure("Title.TLabel", background=palette["background"], foreground=palette["foreground"], font=("TkDefaultFont", 12, "bold"))
+        self.style.configure("AboutTitle.TLabel", background=palette["background"], foreground=palette["foreground"], font=("TkDefaultFont", 20, "bold"))
+        self.style.configure("AboutVersion.TLabel", background=palette["background"], foreground=palette["muted"])
         self.style.configure("Link.TLabel", background=palette["background"], foreground=palette["link"])
         self.style.configure("Thumbnail.TLabel", background=palette["panel"], foreground=palette["foreground"])
         self.style.configure("Stream.Treeview", font=(self.font, 12), rowheight=26)
@@ -742,47 +778,56 @@ class YayTDApp:
 
     def open_about_window(self):
         about = tk.Toplevel(self.root)
-        about.title("About")
+        about.title("About YayTD")
         about.resizable(False, False)
         about.transient(self.root)
         about.grab_set()
 
-        frame = ttk.Frame(about, padding=18)
+        frame = ttk.Frame(about, padding=(24, 22, 24, 18))
         frame.grid(row=0, column=0, sticky="nsew")
+        frame.columnconfigure(1, weight=1)
 
-        icon_path = Path(__file__).resolve().with_name("yaytd_logo_64.png")
+        icon_path = self.bundled_path("yaytd_logo_64.png")
         about.icon_image = None
         if icon_path.exists():
             try:
                 about.icon_image = tk.PhotoImage(file=icon_path.as_posix())
-                ttk.Label(frame, image=about.icon_image).grid(row=0, column=0, columnspan=3, pady=(0, 8))
+                ttk.Label(frame, image=about.icon_image).grid(row=0, column=0, rowspan=3, sticky="n", padx=(0, 18))
             except tk.TclError:
                 pass
 
-        ttk.Label(frame, text="YayTD", style="Title.TLabel").grid(row=1, column=0, columnspan=3, pady=(0, 8))
+        ttk.Label(frame, text="YayTD", style="AboutTitle.TLabel").grid(row=0, column=1, sticky="w")
+        ttk.Label(frame, text=f"Version {self.app_version()}", style="AboutVersion.TLabel").grid(row=1, column=1, sticky="w", pady=(2, 8))
+        ttk.Label(frame, text="Yet Another YouTube Downloader", style="Muted.TLabel").grid(row=2, column=1, sticky="w")
 
-        github_link = ttk.Label(frame, text="https://github.com/frenchfaso/yaytd", style="Link.TLabel", cursor="hand2")
-        github_link.grid(row=2, column=0, columnspan=3, pady=(0, 12))
-        github_link.bind("<Button-1>", lambda _event: webbrowser.open("https://github.com/frenchfaso/yaytd"))
+        ttk.Separator(frame).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(18, 14))
 
-        ttk.Label(
-            frame,
-            text="Yet Another YouTube Downloader\nis a simple GUI built on top of 'yt-dlp'\nwith 'tkinter.ttk' and 'sv-ttk'",
-            justify=tk.CENTER,
-        ).grid(row=3, column=0, columnspan=3, pady=(0, 12))
+        details = ttk.Frame(frame)
+        details.grid(row=4, column=0, columnspan=2, sticky="ew")
+        details.columnconfigure(1, weight=1)
 
-        self.create_about_link(frame, "yt-dlp", "https://github.com/yt-dlp/yt-dlp", 0)
-        self.create_about_link(frame, "sv-ttk", "https://github.com/rdbende/Sun-Valley-ttk-theme", 1)
-        self.create_about_link(frame, "tkinter", "https://docs.python.org/3/library/tkinter.html", 2)
+        self.create_about_detail(details, 0, "Engine", f"yt-dlp {ytdlp_version.__version__}")
+        self.create_about_detail(details, 1, "Interface", f"tkinter.ttk + sv-ttk {self.package_version('sv-ttk')}")
+        self.create_about_detail(details, 2, "Python", f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
 
-        ttk.Button(frame, text="Close", command=about.destroy).grid(row=5, column=0, columnspan=3, pady=(16, 0))
+        links = ttk.Frame(frame)
+        links.grid(row=5, column=0, columnspan=2, sticky="w", pady=(16, 0))
+        self.create_about_link(links, "GitHub", self.REPOSITORY_URL, 0)
+        self.create_about_link(links, "yt-dlp", "https://github.com/yt-dlp/yt-dlp", 1)
+        self.create_about_link(links, "sv-ttk", "https://github.com/rdbende/Sun-Valley-ttk-theme", 2)
 
-        self.center_window(about, 360, 260)
+        ttk.Button(frame, text="Close", command=about.destroy).grid(row=6, column=0, columnspan=2, sticky="e", pady=(18, 0))
+
+        self.center_window(about, 460, 320)
         about.wait_window()
+
+    def create_about_detail(self, frame, row, label, value):
+        ttk.Label(frame, text=label, style="Muted.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 18), pady=3)
+        ttk.Label(frame, text=value).grid(row=row, column=1, sticky="w", pady=3)
 
     def create_about_link(self, frame, text, url, column):
         label = ttk.Label(frame, text=text, style="Link.TLabel", cursor="hand2")
-        label.grid(row=4, column=column, padx=8)
+        label.grid(row=0, column=column, padx=(0, 18))
         label.bind("<Button-1>", lambda _event: webbrowser.open(url))
 
     def center_window(self, window, width, height):

@@ -1,13 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from build_config import resolve_app_version, write_version_file
+
+
+APP_VERSION = resolve_app_version()
+VERSION_FILE = write_version_file('build/yaytd_version.txt', APP_VERSION)
 
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('yaytd_logo_64.png', '.')] + collect_data_files('sv_ttk'),
+    datas=[('yaytd_logo_64.png', '.'), (VERSION_FILE, '.')] + collect_data_files('sv_ttk'),
     hiddenimports=['PIL._tkinter_finder'] + collect_submodules('yt_dlp'),
     hookspath=[],
     hooksconfig={},
