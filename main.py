@@ -808,26 +808,36 @@ class YayTDApp:
 
         self.create_about_detail(details, 0, "Engine", f"yt-dlp {ytdlp_version.__version__}")
         self.create_about_detail(details, 1, "Interface", f"tkinter.ttk + sv-ttk {self.package_version('sv-ttk')}")
-        self.create_about_detail(details, 2, "Python", f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+        self.create_about_detail(details, 2, "Theme detection", f"darkdetect {self.package_version('darkdetect')}")
+        self.create_about_detail(details, 3, "Images", f"Pillow {self.package_version('pillow')}")
+        self.create_about_detail(details, 4, "Certificates", f"certifi {self.package_version('certifi')}")
+        self.create_about_detail(details, 5, "Python", f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
 
         links = ttk.Frame(frame)
         links.grid(row=5, column=0, columnspan=2, sticky="w", pady=(16, 0))
-        self.create_about_link(links, "GitHub", self.REPOSITORY_URL, 0)
-        self.create_about_link(links, "yt-dlp", "https://github.com/yt-dlp/yt-dlp", 1)
-        self.create_about_link(links, "sv-ttk", "https://github.com/rdbende/Sun-Valley-ttk-theme", 2)
+        about_links = [
+            ("GitHub", self.REPOSITORY_URL),
+            ("yt-dlp", "https://github.com/yt-dlp/yt-dlp"),
+            ("sv-ttk", "https://github.com/rdbende/Sun-Valley-ttk-theme"),
+            ("Pillow", "https://python-pillow.org/"),
+            ("darkdetect", "https://github.com/albertosottile/darkdetect"),
+            ("certifi", "https://github.com/certifi/python-certifi"),
+        ]
+        for index, (text, url) in enumerate(about_links):
+            self.create_about_link(links, text, url, index // 3, index % 3)
 
         ttk.Button(frame, text="Close", command=about.destroy).grid(row=6, column=0, columnspan=2, sticky="e", pady=(18, 0))
 
-        self.center_window(about, 460, 320)
+        self.center_window(about, 500, 380)
         about.wait_window()
 
     def create_about_detail(self, frame, row, label, value):
         ttk.Label(frame, text=label, style="Muted.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 18), pady=3)
         ttk.Label(frame, text=value).grid(row=row, column=1, sticky="w", pady=3)
 
-    def create_about_link(self, frame, text, url, column):
+    def create_about_link(self, frame, text, url, row, column):
         label = ttk.Label(frame, text=text, style="Link.TLabel", cursor="hand2")
-        label.grid(row=0, column=column, padx=(0, 18))
+        label.grid(row=row, column=column, sticky="w", padx=(0, 18), pady=2)
         label.bind("<Button-1>", lambda _event: webbrowser.open(url))
 
     def center_window(self, window, width, height):
