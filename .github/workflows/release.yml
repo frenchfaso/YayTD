@@ -90,17 +90,24 @@ jobs:
           merge-multiple: true
 
       - name: Write release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          cat > release-notes.md <<'EOF'
-          Updates:
-          - fixed YouTube video links that include playlist/radio query parameters
-          - migrated the UI to tkinter.ttk with sv-ttk automatic light/dark theme support
-          - switched YouTube extraction/downloads to yt-dlp
-          - added per-stream download cancellation
-          - updated Python dependencies and PyInstaller packaging
+          gh api "repos/$GH_REPO/releases/generate-notes" \
+            --method POST \
+            -f tag_name="$RELEASE_TAG" \
+            -f target_commitish="$GITHUB_SHA" \
+            --jq '.body' > generated-notes.md
 
-          Download the zip for your OS, unzip and run.
-          EOF
+          {
+            echo "This release includes freshly built Linux, macOS, and Windows packages."
+            echo
+            cat generated-notes.md
+            echo
+            echo "Download the zip for your OS, unzip, and run YayTD."
+          } > release-notes.md
 
       - name: Publish GitHub release
         env:
